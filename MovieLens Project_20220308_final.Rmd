@@ -1,0 +1,428 @@
+---
+title: "HarvardX PH125.9x Data Science: MovieLens Project Submission"
+author: "Kai Yin Phyllis Lun"
+date: "3/7/2022"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+
+# Create edx set, validation set (final hold-out test set)---------------
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(data.table)) install.packages("data.table", repos = "http://cran.us.r-project.org")
+
+library(tidyverse)
+library(caret)
+library(data.table)
+library(stringr)
+library(knitr)
+library(stats)
+# MovieLens 10M dataset:
+# https://grouplens.org/datasets/movielens/10m/
+# http://files.grouplens.org/datasets/movielens/ml-10m.zip
+
+dl <- tempfile()
+getOption('timeout')
+options(timeout=600)
+download.file("http://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+
+
+ratings <- fread(text = gsub("::", "\t", readLines(unzip(dl, "ml-10M100K/ratings.dat"))),
+                 col.names = c("userId", "movieId", "rating", "timestamp"))
+
+movies <- str_split_fixed(readLines(unzip(dl, "ml-10M100K/movies.dat")), "\\::", 3)
+colnames(movies) <- c("movieId", "title", "genres")
+
+# if using R 3.6 or earlier:
+#movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(levels(movieId))[movieId],
+#                                           title = as.character(title),
+#                                           genres = as.character(genres))
+# if using R 4.0 or later:
+movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(movieId),
+                                           title = as.character(title),
+                                           genres = as.character(genres))
+
+
+movielens <- left_join(ratings, movies, by = "movieId")
+
+# Validation set will be 10% of MovieLens data
+set.seed(1, sample.kind="Rounding") # if using R 3.5 or earlier, use `set.seed(1)`
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+
+# Make sure userId and movieId in validation set are also in edx set-- so there are ioveralaps in both sets
+validation <- temp %>% 
+  semi_join(edx, by = "movieId") %>%
+  semi_join(edx, by = "userId")
+
+# Add rows removed from validation set back into edx set
+removed <- anti_join(temp, validation)
+edx <- rbind(edx, removed)
+
+rm(dl, ratings, movies, test_index, temp, movielens, removed)
+
+#####
+```
+
+
+```{r, echo=FALSE}
+library(tidyverse)
+library(caret)
+library(data.table)
+library(stringr)
+library(stats)
+library(scales)
+library(knitr)
+opts_chunk$set(tidy.opts=list(width.cutoff=60),tidy=TRUE)
+library(rmarkdown)
+library(tinytex)
+```
+
+Data Cleaning
+================================
+Edx set and validation set
+--------------------------------
+Here I first separated the movie titles from the year of movie release. I have also converted the time stamps of review to standard date formate and extracted the years of rating. A new variable, year_diff, is used to assess the time difference between year of movie release and year of rating. 
+
+```{r, echo=TRUE}
+edx_clean <- edx%>% 
+  mutate(year=str_extract(title, "\\(\\d+\\)")) %>% 
+  mutate(year=str_extract(year, "\\d+")) %>% 
+  mutate(title=str_remove(title, "\\s+\\(\\d+\\)")) %>% 
+  mutate(rate_year= as.POSIXct(timestamp,origin = "1970-01-01"))%>% 
+  mutate(rate_year=as.numeric(format(rate_year,"%Y")), 
+         year=as.numeric(str_extract(year,"\\d+"))) %>% 
+  select(-timestamp) %>% mutate(year_diff=rate_year-year)
+```
+
+The title of movie ID #889 has to be manually processed due to it having two brackets of years in the title.
+```{r, echo=TRUE}
+edx_clean[edx_clean$movieId==889]<-edx_clean[edx_clean$movieId==889] %>% 
+  mutate (year=as.numeric(1994))   %>% mutate(year_diff=rate_year-year)
+```
+
+The same process is applied to the validation set so that the machine learning models can be applied properly later on.
+```{r, echo=TRUE}
+validation_clean<-validation%>% 
+  mutate(year=str_extract(title, "\\(\\d+\\)")) %>% 
+  mutate(year=str_extract(year, "\\d+")) %>% 
+  mutate(title=str_remove(title, "\\s+\\(\\d+\\)")) %>% 
+  mutate(rate_year= as.POSIXct(timestamp,origin = "1970-01-01"))%>% 
+  mutate(rate_year=as.numeric(format(rate_year,"%Y")), 
+         year=as.numeric(str_extract(year,"\\d+"))) %>% 
+  select(-timestamp) %>% mutate(year_diff=rate_year-year)
+
+validation_clean[validation$movieId==889]<-
+  validation_clean[validation_clean$movieId==889] %>% 
+  mutate (year=as.numeric(1994))  %>% mutate(year_diff=rate_year-year)
+
+```
+
+
+Data Exploration
+===================
+In the edx dataset, we have 69878 unique users and 10677 unique movies.
+```{r, echo=TRUE}
+edx_clean %>% summarize(n_users = n_distinct(userId), 
+                        n_movies = n_distinct(movieId))
+```
+
+
+I. Distribution of movie ratings
+-----------------------------
+The most frequently given ratings are 3 and 4. 
+```{r, echo=FALSE, out.width = "70%"}
+edx_clean %>% ggplot (aes(x=rating)) + 
+  geom_bar()+  
+  labs(title="Distributions of movie ratings",x="Ratings", 
+       y="Count", face="bold")+
+  scale_x_continuous()+
+  scale_y_discrete(labels = scales::comma)+
+  theme_classic()
+```
+
+II. Distribution of number of ratings by users
+----------------------------------------------
+
+We can see that there is a huge variation on the number of movie ratings given by the users (range=10-6616). Three quarters of the users rating 141 movies or less. Of the 69878 users included in the pilot set, on average they have 129 move ratings and three quarters of them have about 141 ratings. That means a quarter of users gave a large number of movie ratings.
+```{r, echo=TRUE}
+edx_clean %>% group_by(userId) %>% count(userId)  %>% summary(n) 
+```
+
+III. Association between the variations of movie ratings and prolific raters
+--------------------------
+Generally, ratings coming from prolific raters are more similar than those from users who provided only a few ratings.However, it should be noted that the deviation is quite large among those with less than or equal to 141 movie ratings.   
+
+```{r, echo=TRUE,  out.width = "70%"}
+edx_clean %>% group_by(userId) %>% summarize(standard_dev=sd(rating)) %>% 
+  left_join(edx_clean %>% group_by(userId) %>% count(userId))%>% 
+  filter(n<=141) %>% 
+  as_tibble() %>% 
+  ggplot(aes(x=n,y=standard_dev)) + geom_point(size=0.1) + 
+  scale_x_continuous()+
+  labs(title="Standard deviations of movie ratings by number of user ratings",
+       x="Ratings", 
+       y="standard deviations", face="bold")+
+  theme_classic()
+
+
+```
+IV. Number of ratings received by a movie 
+----------
+Similar to the number of ratings by users, the number of ratings received by movies also varied greatly (range = 1-31362). Three quarters of movies received less than 565 ratings. 
+```{r, echo=TRUE}
+edx_clean %>% dplyr::count(movieId) %>% summary()
+```
+
+V. Year of movie release and year of movie rating 
+--------
+The correlation between the year of rating and the year of movie release appears roughly normally distributed.
+
+```{r, echo=FALSE, out.width = "70%"}
+
+edx_clean %>% group_by(movieId) %>% mutate(rating=as.numeric(rating)) %>% 
+  summarize(correlations=cor(year_diff,rating)) %>%
+  ggplot (aes(correlations)) + 
+  geom_histogram(bins =250)+ 
+  labs(x = "Correlation coefficients of year of\nmovie release and year of rating")+
+  theme_bw()
+```
+
+Model Training
+===========================
+Evaluation metric: RMSE
+---------------------------
+```{r, echo=TRUE}
+RMSE <- function(true_ratings, predicted_ratings){
+  sqrt(mean((true_ratings - predicted_ratings)^2))
+}
+```
+Setting up training and testing sets within the edx dataset
+----------------
+Within the edx dataset, I am creating a training set and a test set. The training set constitutes 90% of the edx dataset. There are 8100048 observations in the training set. 
+```{r, echo=FALSE}
+set.seed(125, sample.kind = "Rounding")
+edx_test_index <- createDataPartition(edx_clean$rating, times = 1, 
+                                      p = 0.1, list = FALSE)
+edx_clean_train <- edx_clean[-edx_test_index,]
+edx_clean_test<- edx_clean[edx_test_index,]
+nrow(edx_clean_train) 
+
+```
+
+Model 1: Movie effect model
+--------------------
+The movie effect model has a RMSE of 0.9442066.
+```{r, echo=FALSE}
+mu <- mean(edx_clean_train$rating)
+avgs_movie <- edx_clean_train %>% 
+  group_by(movieId) %>% 
+  summarize(b_i = mean(rating - mu))
+
+predicted_ratings <- edx_clean_test  %>% 
+  left_join(avgs_movie, by='movieId') %>%
+  mutate(prediction = mu + b_i) 
+
+sum(is.na(predicted_ratings$prediction))
+predicted_ratings$prediction[is.na(predicted_ratings$prediction)]<-0
+model_1_rmse <- RMSE(edx_clean_test$rating, predicted_ratings$prediction)
+
+edx_rmse_results <- tibble(method = "edx: movidId only model", RMSE = model_1_rmse)
+edx_rmse_results %>% knitr::kable()
+
+```
+
+Model 2: Movie and user effect model
+--------------------
+The movie and user effect model has a RMSE of 0.8663173, which is lower than the movie effect only model.
+```{r, echo=FALSE}
+avgs_user <- edx_clean_train %>% 
+  left_join(avgs_movie, by='movieId') %>%
+  group_by(userId) %>%
+  summarize(b_u = mean(rating - mu - b_i))
+
+predicted_ratings <- edx_clean_test %>% 
+  left_join(avgs_movie, by='movieId') %>%
+  left_join(avgs_user, by='userId') %>%
+  mutate(prediction = mu + b_i + b_u) 
+
+#sum(is.na(predicted_ratings$prediction))
+predicted_ratings$prediction[is.na(predicted_ratings$prediction)]<-0
+
+model_2_rmse <- RMSE(edx_clean_test$rating, predicted_ratings$prediction)
+edx_rmse_results <-bind_rows(edx_rmse_results, 
+                             data.frame(method="edx: movidId and userId model", 
+                                        RMSE=model_2_rmse))
+edx_rmse_results %>% knitr::kable()
+```
+
+Model 3: Movie, user, and difference-in-year effect model
+-------
+The Movie, user, and difference-in-year effect model has the lowest RMSE thus far: 0.8659055.
+```{r, echo=FALSE}
+avgs_time <- edx_clean_train %>% 
+  left_join(avgs_movie, by='movieId') %>%
+  left_join(avgs_user, by='userId') %>%
+  group_by(year_diff) %>%
+  summarize(b_v = mean(rating - mu-b_i-b_u))
+
+predicted_ratings <- edx_clean_test %>% 
+  left_join(avgs_movie, by='movieId') %>%
+  left_join(avgs_user, by='userId') %>%
+ left_join(avgs_time, by='year_diff') %>%
+  mutate(prediction = mu + b_i + b_u+b_v) 
+
+
+#sum(is.na(predicted_ratings$prediction))
+predicted_ratings$prediction[is.na(predicted_ratings$prediction)]<-0
+
+model_3_rmse <- RMSE(edx_clean_test$rating, predicted_ratings$prediction)
+edx_rmse_results <-bind_rows(edx_rmse_results, 
+                             data.frame(method="edx: movidId, userId,
+                                        and difference-in-year model", 
+                                        RMSE=model_3_rmse))
+edx_rmse_results %>% knitr::kable()
+```
+
+
+Model 4: Movie, user, difference-in-year, and movie genre effect model
+-------------------
+Lastly, the movie, user, difference-in-year, and movie genre effect model only improved the last model slightly, with a RMSE of 0.8655948.  
+```{r, echo=FALSE}
+avgs_genres <- edx_clean_train %>% 
+  left_join(avgs_movie, by='movieId') %>%
+  left_join(avgs_user, by='userId') %>%
+  left_join(avgs_time, by='year_diff') %>%
+  group_by(genres) %>%
+  summarize(b_w = mean(rating - mu-b_i-b_u-b_v))
+
+predicted_ratings <- edx_clean_test %>% 
+  left_join(avgs_movie, by='movieId') %>%
+  left_join(avgs_user, by='userId') %>%
+  left_join(avgs_time, by='year_diff') %>%
+  left_join(avgs_genres, by='genres') %>%
+  mutate(prediction = mu + b_i + b_u+b_v+b_w) 
+
+#sum(is.na(predicted_ratings$prediction))
+predicted_ratings$prediction[is.na(predicted_ratings$prediction)]<-0
+
+model_4_rmse <- RMSE(edx_clean_test$rating, predicted_ratings$prediction)
+edx_rmse_results <-bind_rows(edx_rmse_results, 
+                             data.frame(
+                             method="edx: movidId, userId, 
+                                        difference in year, and genre model", 
+                                        RMSE=model_4_rmse))
+edx_rmse_results %>% knitr::kable()
+
+```
+
+Testing regularization in Model 4: Movie, user, difference-in-year, and movie genre effect model
+===================
+It turns out lamda=5 in the regularization model would achieve the lowest RMSE.
+```{r, echo=FALSE,  out.width = "70%"}
+lambdas <- seq(0, 10, 0.5)
+rmses <- sapply(lambdas, function(l){
+  mu <- mean(edx_clean_train$rating)
+  
+  
+  b_i <- edx_clean_train %>% 
+    group_by(movieId) %>%
+    summarize(b_i = sum(rating - mu)/(n()+l))
+ 
+   b_u <- edx_clean_train %>% 
+    left_join(b_i, by="movieId") %>%
+    group_by(userId) %>%
+    summarize(b_u = sum(rating - b_i - mu)/(n()+l))
+   
+   
+   b_v <- edx_clean_train %>% 
+     left_join(b_i, by='movieId') %>%
+     left_join(b_u, by='userId') %>%
+     group_by(year_diff) %>%
+     summarize(b_v = mean(rating - mu-b_i-b_u)/(n()+l))
+   
+   b_w <- edx_clean_train %>% 
+     left_join(b_i, by='movieId') %>%
+     left_join(b_u, by='userId') %>%
+     left_join(b_v, by='year_diff') %>%
+     group_by(genres) %>%
+     summarize(b_w = mean(rating - mu-b_i-b_u-b_v)/(n()+l))
+  
+   predicted_ratings <- edx_clean_test %>% 
+    left_join(b_i, by='movieId') %>%
+    left_join(b_u, by='userId') %>%
+    left_join(b_v, by='year_diff') %>%
+    left_join(b_w, by='genres') %>%
+    mutate(prediction = mu + b_i + b_u+b_v+b_w) 
+  
+  predicted_ratings$prediction[is.na(predicted_ratings$prediction)]<-0
+  
+  return(RMSE(edx_clean_test$rating, predicted_ratings$prediction))
+})
+
+
+qqplot(lambdas, rmses)  
+lambdas[which.min(rmses)]
+```
+Applying trained, regularized machine learning models to validation dataset.
+================
+Regularized Model 4: Movie, user, difference-in-year, and movie genre effect model
+----------------
+Finally, the fourth and final model has a RMSE of 0.8652284.
+```{r, echo=FALSE}
+mu <- mean(edx_clean_train$rating)
+l<-5
+
+
+b_i <- edx_clean_train %>% 
+  group_by(movieId) %>%
+  summarize(b_i = sum(rating - mu)/(n()+l))
+
+b_u <- edx_clean_train %>% 
+  left_join(b_i, by="movieId") %>%
+  group_by(userId) %>%
+  summarize(b_u = sum(rating - b_i - mu)/(n()+l))
+
+b_v <- edx_clean_train %>% 
+  left_join(b_i, by='movieId') %>%
+  left_join(b_u, by='userId') %>%
+  group_by(year_diff) %>%
+  summarize(b_v = mean(rating - mu-b_i-b_u)/(n()+l))
+
+b_w <- edx_clean_train %>% 
+  left_join(b_i, by='movieId') %>%
+  left_join(b_u, by='userId') %>%
+  left_join(b_v, by='year_diff') %>%
+  group_by(genres) %>%
+  summarize(b_w = mean(rating - mu-b_i-b_u-b_v)/(n()+l))
+
+
+predicted_ratings <- validation_clean %>% 
+  left_join(b_i, by='movieId') %>%
+  left_join(b_u, by='userId') %>%
+  left_join(b_v, by='year_diff') %>%
+  left_join(b_w, by='genres') %>%
+  mutate(prediction = mu + b_i + b_u+b_v+b_w) 
+
+
+#sum(is.na(predicted_ratings$prediction))
+predicted_ratings$prediction[is.na(predicted_ratings$prediction)]<-0
+
+model_4_rmse <- RMSE(validation_clean$rating, 
+                     predicted_ratings$prediction)
+edx_rmse_results <-bind_rows(edx_rmse_results, 
+                  data.frame(method="validation: movidId, userId, difference in year, 
+                  and genre model (regularized)", RMSE=model_4_rmse))
+edx_rmse_results %>% knitr::kable()
+```
+
+
+Conclusion
+===================
+After fitting the four trained linear regression models to the validation data and in consideration of the constraints of these models, the model with the best performance is the regularized model with movidId, userId, difference in years of movie release and movie rating ; and movie genres as features (lambda = 5), which yields a RMSE of 0.8652284.
+
+
+
